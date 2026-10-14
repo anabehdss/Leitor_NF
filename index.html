@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>Leitor de NF</title>
+
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+  <div class="container">
+
+    <h1>Leitor de NF!</h1>
+
+    <p>
+      O leitor realiza a extração automática das informações
+      das notas fiscais para o Faturamento.
+    </p>
+
+    <!-- Campo para selecionar os arquivos (vários PDFs) -->
+    <input type="file" id="arquivoPDF" accept=".pdf" multiple hidden>
+
+    <!-- Botão que abre a pasta de arquivos -->
+    <button id="adicionarDocumento">
+      Adicionar documentos
+    </button>
+
+    <!-- Resumo da leitura -->
+    <p id="documento"></p>
+
+    <!-- Lista com o status de cada arquivo -->
+    <ul id="listaDocumentos"></ul>
+
+    <!-- Botão para baixar a planilha (aparece depois da leitura) -->
+    <button id="baixarXlsx" hidden>
+      Baixar xlsx
+    </button>
+
+  </div>
+
+  <!-- Bibliotecas: leitura de PDF (pdf.js) e criação de planilha (SheetJS) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+  <script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+    const arquivoPDF = document.getElementById("arquivoPDF");
+    const adicionarDocumento = document.getElementById("adicionarDocumento");
+    const documento = document.getElementById("documento");
+    const listaDocumentos = document.getElementById("listaDocumentos");
+    const baixarXlsx = document.getElementById("baixarXlsx");
+
+    // Guarda os dados de cada NF lida
+    const notas = [];
+
+    // ---------- Leitura do PDF ----------
+    async function lerTexto(arquivo) {
+      const buffer = await arquivo.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+
+      let texto = "";
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const pagina = await pdf.getPage(i);
+        const conteudo = await pagina.getTextContent();
+        texto += conteudo.items
+          .map(item => item.str + (item.hasEOL ? "\n" : " "))
+          .join("") + "\n";
+      }
+      return texto;
+    }
+
+    // ---------- Extração dos campos ----------
+    // Quando o valor não é encontrado, a célula fica vazia na planilha
+    // e o arquivo aparece na lista com um aviso.
+    function buscar(texto, regex) {
+      const m = texto.match(regex);
+      return m ? m[1].trim() : "";
+    }
+
+    function paraNumero(valor) {
+      if (!valor) return "";
+      return parseFloat(valor.replace(/\./g, "").replace(",", "."));
+    }
+
+    function extrairCampos(texto) {
+      // Número da NFS-e
+      const numero = buscar(texto, /N[úu]mero\s+da\s+NFS-?e\s*:?\s*(\d+)/i);
+
+      // Valor total: aparece logo depois de "VALOR DA OPERAÇÃO / SERVIÇO"
+      const valor = buscar(
+        texto,
+        /OPERA[ÇC][ÃA]O\s*\/\s*SERVI[ÇC]O[\s\S]{0,40}?R\$\s*([\d.]+,\d{2})/i
+      );
+
+      // CNPJ do tomador do serviço: primeiro CNPJ que aparece
+      // depois da palavra "TOMADOR" (e antes do "INTERMEDIÁRIO", se houver)
+      let cnpj = "";
+      const posTomador = texto.search(/TOMADOR/i);
+      if (posTomador >= 0) {
+        let trecho = texto.slice(posTomador + 7);
+        const fim = trecho.search(/INTERMEDI[ÁA]RIO/i);
+        if (fim >= 0) trecho = trecho.slice(0, fim);
+        cnpj = buscar(trecho, /(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/);
+      }
+
+      return {
+        "Número da NF": numero,
+        "CNPJ do tomador": cnpj,
+        "Valor total da NFS-e": paraNumero(valor)
+      };
+    }
+
+    // ---------- Botão de adicionar ----------
+    adicionarDocumento.addEventListener("click", () => arquivoPDF.click());
+
+    // ---------- Quando escolher os arquivos ----------
+    arquivoPDF.addEventListener("change", async () => {
+      const arquivos = Array.from(arquivoPDF.files);
+      if (arquivos.length === 0) return;
+
+      notas.length = 0;
+      listaDocumentos.innerHTML = "";
+      baixarXlsx.hidden = true;
+      documento.textContent = "Lendo " + arquivos.length + " documento(s)...";
+
+      for (const arquivo of arquivos) {
+        const item = document.createElement("li");
+        item.textContent = arquivo.name + " - lendo...";
+        listaDocumentos.appendChild(item);
+
+        try {
+          const texto = await lerTexto(arquivo);
+          console.log("Texto de " + arquivo.name + ":\n", texto);
+
+          const campos = extrairCampos(texto);
+          notas.push({ "Arquivo": arquivo.name, ...campos });
+
+          // Avisa quais campos não foram encontrados
+          const faltando = Object.keys(campos).filter(c => campos[c] === "");
+          item.textContent = faltando.length === 0
+            ? arquivo.name + " - NF " + campos["Número da NF"] + " - R$ " +
+              campos["Valor total da NFS-e"].toLocaleString("pt-BR", { minimumFractionDigits: 2 })
+            : arquivo.name + " - não encontrado: " + faltando.join(", ");
+        } catch (erro) {
+          item.textContent = arquivo.name + " - erro ao ler";
+          console.error(arquivo.name, erro);
+        }
+      }
+
+      documento.textContent =
+        notas.length + " de " + arquivos.length + " documento(s) lidos.";
+      baixarXlsx.hidden = notas.length === 0;
+
+      // Permite escolher os mesmos arquivos de novo
+      arquivoPDF.value = "";
+    });
+
+    // ---------- Baixar a planilha ----------
+    baixarXlsx.addEventListener("click", () => {
+      const planilha = XLSX.utils.json_to_sheet(notas);
+      const livro = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(livro, planilha, "NFs");
+      XLSX.writeFile(livro, "notas-fiscais.xlsx");
+    });
+  </script>
+
+</body>
+
+</html>
